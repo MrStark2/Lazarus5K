@@ -91,6 +91,12 @@ Quasi sempre manca il permesso di Registrazione schermo sul Mac principale: vedi
 
 Controlla che RelayViewer sia già in esecuzione e che il Ponte Thunderbolt abbia un indirizzo 169.254.x.x su entrambi i Mac. In alternativa passa direttamente l'indirizzo IP dell'iMac: `./RelayHost <indirizzo-IP-dell-iMac>`.
 
+### Stop (standby) del Mac principale
+
+Finché RelayHost è aperto, il Mac principale non va in stop per inattività. Lo schermo può comunque spegnersi dopo il tempo impostato in Impostazioni di Sistema, ma il Mac non va in stop. Chiudere il coperchio di un portatile lo manda invece in stop, a meno che sia collegato all'alimentatore e a un monitor esterno.
+
+Al risveglio RelayHost riavvia da solo la cattura e ritrasmette tutto lo schermo. Se l'iMac non risponde più, la connessione cade in una decina di secondi e RelayHost si ricollega. Non serve rilanciare né RelayHost né RelayViewer.
+
 ## Licenza
 
 Distribuito con licenza MIT: vedi il file [LICENSE](LICENSE).

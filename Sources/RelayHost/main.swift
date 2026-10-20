@@ -13,6 +13,7 @@ import CoreAudio
 import ScreenCaptureKit
 import Compression
 import Network
+import IOKit.pwr_mgt
 import CGVirtualDisplayPrivate
 import Shared
 
@@ -64,6 +65,65 @@ func selectRetinaMode(_ displayID: CGDirectDisplayID) {
     }
 }
 
+// MARK: - Risparmio energetico
+
+/// Impedisce lo stop per inattività finché RelayHost è in esecuzione.
+/// Chiudere il coperchio senza alimentatore e monitor manda comunque il Mac in stop.
+func preventIdleSleep() -> IOPMAssertionID? {
+    var id: IOPMAssertionID = 0
+    let result = IOPMAssertionCreateWithName(
+        kIOPMAssertionTypePreventUserIdleSystemSleep as CFString,
+        IOPMAssertionLevel(kIOPMAssertionLevelOn),
+        "RelayLite: l'iMac è in uso come monitor" as CFString, &id)
+    guard result == kIOReturnSuccess else {
+        print("Impossibile impedire lo stop per inattività (\(result)).")
+        return nil
+    }
+    return id
+}
+
+/// Avvisa quando il Mac esce dallo stop (per esempio a coperchio chiuso e riaperto).
+final class PowerMonitor {
+    // Valori di iokit_common_msg(…) in IOKit/IOMessage.h: le macro non arrivano in Swift.
+    private static let canSystemSleep: natural_t = 0xE000_0270
+    private static let systemWillSleep: natural_t = 0xE000_0280
+    private static let systemHasPoweredOn: natural_t = 0xE000_0300
+
+    private var rootPort: io_connect_t = 0
+    private var notifier: io_object_t = 0
+    private var port: IONotificationPortRef?
+    var onSleep: (() -> Void)?
+    var onWake: (() -> Void)?
+
+    func start() {
+        let refcon = Unmanaged.passUnretained(self).toOpaque()
+        rootPort = IORegisterForSystemPower(refcon, &port, { refcon, _, messageType, argument in
+            guard let refcon else { return }
+            Unmanaged<PowerMonitor>.fromOpaque(refcon).takeUnretainedValue()
+                .handle(messageType, argument)
+        }, &notifier)
+        guard rootPort != 0, let port else {
+            print("Impossibile ricevere le notifiche di stop e risveglio.")
+            return
+        }
+        IONotificationPortSetDispatchQueue(port, .main)
+    }
+
+    private func handle(_ messageType: natural_t, _ argument: UnsafeMutableRawPointer?) {
+        switch messageType {
+        case PowerMonitor.canSystemSleep:
+            IOAllowPowerChange(rootPort, Int(bitPattern: argument))
+        case PowerMonitor.systemWillSleep:
+            onSleep?()
+            IOAllowPowerChange(rootPort, Int(bitPattern: argument))
+        case PowerMonitor.systemHasPoweredOn:
+            onWake?()
+        default:
+            break
+        }
+    }
+}
+
 // MARK: - Rete
 
 final class Sender {
@@ -90,6 +150,13 @@ final class Sender {
     func connect(to endpoint: NWEndpoint) {
         let tcp = NWProtocolTCP.Options()
         tcp.noDelay = true
+        // Dopo uno stop o un cavo staccato l'iMac non risponde più: senza keepalive
+        // la connessione sembrerebbe aperta per sempre. Così cade in circa 10 secondi.
+        tcp.enableKeepalive = true
+        tcp.keepaliveIdle = 4
+        tcp.keepaliveInterval = 2
+        tcp.keepaliveCount = 3
+        tcp.connectionDropTime = 10 // stesso limite per i dati inviati e mai confermati
         let params = NWParameters(tls: nil, tcp: tcp)
         params.prohibitedInterfaceTypes = [.wifi] // solo cavo
 
@@ -122,6 +189,8 @@ final class Sender {
         conn.send(content: message, completion: .contentProcessed { [weak self] error in
             guard let self else { return }
             self.lock.lock()
+            // Gli invii di una connessione ormai chiusa non contano più.
+            guard self.connection === conn else { self.lock.unlock(); return }
             self.pending -= 1
             let drained = self.pending == 0
             self.lock.unlock()
@@ -131,7 +200,7 @@ final class Sender {
     }
 
     private func setConnection(_ conn: NWConnection?) {
-        lock.lock(); connection = conn; lock.unlock()
+        lock.lock(); connection = conn; pending = 0; lock.unlock()
     }
 }
 
@@ -298,6 +367,11 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate {
     private var stream: SCStream?
     private var lastFrame: CVPixelBuffer?
     private var frameWaiting = false
+    // Stato di avvio e riavvio: si usa solo dalla coda principale.
+    private var displayID: CGDirectDisplayID = kCGNullDirectDisplay
+    private var hasStarted = false
+    private var restartPending = false
+    private var generation = 0 // ogni riavvio annulla i tentativi di avvio ancora in corso
 
     init(video: Sender, audio: Sender) {
         self.video = video
@@ -306,7 +380,34 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private static let maxDisplayRetries = 10
 
+    /// Al primo avvio un errore fa uscire con la diagnostica; dopo, la cattura viene riavviata.
+    private func fail(_ message: String) {
+        print(message)
+        if hasStarted {
+            restart(reason: "nuovo tentativo", delay: 5)
+        } else {
+            exit(1)
+        }
+    }
+
+    /// Ferma la cattura e la riavvia (dopo il risveglio o un'interruzione). Coda principale.
+    func restart(reason: String, delay: TimeInterval = 2) {
+        guard hasStarted, !restartPending else { return }
+        restartPending = true
+        generation += 1
+        print("Riavvio la cattura (\(reason)) tra \(Int(delay)) secondi…")
+        stream?.stopCapture { _ in }
+        stream = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            self.restartPending = false
+            selectRetinaMode(self.displayID)
+            self.start(displayID: self.displayID)
+        }
+    }
+
     func start(displayID: CGDirectDisplayID, retry: Int = 0) {
+        self.displayID = displayID
+        let generation = self.generation
         // Un display in duplicazione non compare tra quelli catturabili da ScreenCaptureKit.
         let mirrored = CGDisplayMirrorsDisplay(displayID)
         if mirrored != kCGNullDirectDisplay {
@@ -320,62 +421,80 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate {
         }
 
         SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { content, error in
-            guard let content else {
-                print("ScreenCaptureKit: \(error?.localizedDescription ?? "errore sconosciuto")")
-                print("→ Impostazioni di Sistema › Privacy e sicurezza › Registrazione schermo e audio: abilita il Terminale.")
-                exit(1)
+            DispatchQueue.main.async {
+                guard generation == self.generation else { return }
+                self.configure(content: content, error: error, displayID: displayID,
+                               retry: retry, generation: generation)
             }
-            guard let display = content.displays.first(where: { $0.displayID == displayID }) else {
-                if retry < Capturer.maxDisplayRetries {
-                    print("Monitor virtuale non ancora catturabile, riprovo (\(retry + 1)/\(Capturer.maxDisplayRetries))…")
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        self.start(displayID: displayID, retry: retry + 1)
-                    }
+        }
+    }
+
+    /// Coda principale.
+    private func configure(content: SCShareableContent?, error: Error?,
+                           displayID: CGDirectDisplayID, retry: Int, generation: Int) {
+        guard let content else {
+            print("ScreenCaptureKit: \(error?.localizedDescription ?? "errore sconosciuto")")
+            return fail("→ Impostazioni di Sistema › Privacy e sicurezza › Registrazione schermo e audio: abilita il Terminale.")
+        }
+        guard let display = content.displays.first(where: { $0.displayID == displayID }) else {
+            if retry < Capturer.maxDisplayRetries {
+                print("Monitor virtuale non ancora catturabile, riprovo (\(retry + 1)/\(Capturer.maxDisplayRetries))…")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    guard generation == self.generation else { return }
+                    self.start(displayID: displayID, retry: retry + 1)
+                }
+                return
+            }
+            print("Monitor virtuale (ID \(displayID)) non trovato tra gli schermi catturabili.")
+            print("Schermi catturabili:")
+            for d in content.displays {
+                print("  ID \(d.displayID): \(d.width)x\(d.height)")
+            }
+            print("CGDisplayIsOnline(\(displayID)) = \(CGDisplayIsOnline(displayID))")
+            return fail("CGDisplayMirrorsDisplay(\(displayID)) = \(CGDisplayMirrorsDisplay(displayID))")
+        }
+
+        let config = SCStreamConfiguration()
+        config.width = pixelWidth
+        config.height = pixelHeight
+        config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
+        config.pixelFormat = kCVPixelFormatType_32BGRA
+        config.colorSpaceName = CGColorSpace.sRGB
+        config.queueDepth = 5
+        config.showsCursor = true
+        if #available(macOS 13.0, *) {
+            config.capturesAudio = true
+            config.excludesCurrentProcessAudio = true
+            config.sampleRate = audioSampleRate
+            config.channelCount = audioChannels
+        } else if !hasStarted {
+            print("Audio non disponibile: serve macOS 13 o successivo sul Mac principale.")
+        }
+
+        let filter = SCContentFilter(display: display, excludingWindows: [])
+        let stream = SCStream(filter: filter, configuration: config, delegate: self)
+        do {
+            try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: self.queue)
+            if #available(macOS 13.0, *) {
+                try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: self.audioQueue)
+            }
+        } catch {
+            return fail("addStreamOutput: \(error)")
+        }
+        self.stream = stream
+        stream.startCapture { error in
+            DispatchQueue.main.async {
+                guard self.stream === stream else { // superato da un altro riavvio
+                    stream.stopCapture { _ in }
                     return
                 }
-                print("Monitor virtuale (ID \(displayID)) non trovato tra gli schermi catturabili.")
-                print("Schermi catturabili:")
-                for d in content.displays {
-                    print("  ID \(d.displayID): \(d.width)x\(d.height)")
-                }
-                print("CGDisplayIsOnline(\(displayID)) = \(CGDisplayIsOnline(displayID))")
-                print("CGDisplayMirrorsDisplay(\(displayID)) = \(CGDisplayMirrorsDisplay(displayID))")
-                exit(1)
-            }
-
-            let config = SCStreamConfiguration()
-            config.width = pixelWidth
-            config.height = pixelHeight
-            config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
-            config.pixelFormat = kCVPixelFormatType_32BGRA
-            config.colorSpaceName = CGColorSpace.sRGB
-            config.queueDepth = 5
-            config.showsCursor = true
-            if #available(macOS 13.0, *) {
-                config.capturesAudio = true
-                config.excludesCurrentProcessAudio = true
-                config.sampleRate = audioSampleRate
-                config.channelCount = audioChannels
-            } else {
-                print("Audio non disponibile: serve macOS 13 o successivo sul Mac principale.")
-            }
-
-            let filter = SCContentFilter(display: display, excludingWindows: [])
-            let stream = SCStream(filter: filter, configuration: config, delegate: self)
-            do {
-                try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: self.queue)
-                if #available(macOS 13.0, *) {
-                    try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: self.audioQueue)
-                }
-            } catch {
-                print("addStreamOutput: \(error)")
-                exit(1)
-            }
-            stream.startCapture { error in
-                if let error { print("Avvio cattura fallito: \(error)"); exit(1) }
+                if let error { return self.fail("Avvio cattura fallito: \(error)") }
+                let isRestart = self.hasStarted
+                self.hasStarted = true
                 print("Cattura avviata: \(pixelWidth)x\(pixelHeight) @ \(fps) fps + audio")
+                // Dopo un riavvio l'iMac potrebbe mostrare un'immagine vecchia: rimandala tutta.
+                if isRestart { self.sendFullFrame() }
             }
-            self.stream = stream
         }
     }
 
@@ -412,8 +531,15 @@ final class Capturer: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
-        print("Cattura interrotta: \(error)")
-        exit(1)
+        DispatchQueue.main.async {
+            guard self.stream === stream else { return }
+            print("Cattura interrotta: \(error)")
+            if self.hasStarted {
+                self.restart(reason: "cattura interrotta")
+            } else {
+                exit(1)
+            }
+        }
     }
 }
 
@@ -431,6 +557,15 @@ let capturer = Capturer(video: videoSender, audio: audioSender)
 
 videoSender.onConnected = { capturer.sendFullFrame() }
 videoSender.onDrained = { capturer.queue.async { capturer.sendIfPossible() } }
+
+let sleepAssertion = preventIdleSleep()
+let powerMonitor = PowerMonitor()
+powerMonitor.onSleep = { print("Il Mac va in stop…") }
+powerMonitor.onWake = {
+    print("Il Mac si è risvegliato.")
+    capturer.restart(reason: "risveglio dallo stop")
+}
+powerMonitor.start()
 
 // Diamo a macOS un attimo per registrare il monitor, poi Retina e cattura.
 DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {

@@ -8,3 +8,6 @@ DerivedData/
 
 # macOS
 .DS_Store
+
+# App costruita da scripts/build-app.sh
+dist/

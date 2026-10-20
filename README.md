@@ -1,9 +1,11 @@
-# RelayLite
+# Lazarus5K
 
-> **English summary.** RelayLite turns a 27" 5K iMac (late 2015, Intel, macOS Monterey) into a Retina external display, with audio, for a newer Apple Silicon Mac. The host creates a virtual display through the private `CGVirtualDisplay` API, captures it with ScreenCaptureKit and sends only the changed 128×128 tiles, compressed losslessly with LZ4, over a Thunderbolt Bridge link. The viewer draws them with Metal and plays the system audio. It is a personal hobby project and has been tested on a single hardware setup only. Documentation below is in Italian.
+> **English summary.** Lazarus5K turns a 27" 5K iMac (late 2015, Intel, macOS Monterey) into a Retina external display, with audio, for a newer Apple Silicon Mac. The host creates a virtual display through the private `CGVirtualDisplay` API, captures it with ScreenCaptureKit and sends only the changed 128×128 tiles, compressed losslessly with LZ4, over a Thunderbolt Bridge link. The viewer draws them with Metal and plays the system audio. It is a personal hobby project and has been tested on a single hardware setup only. Documentation below is in Italian.
 
 Usa un iMac 27" 5K come monitor esterno Retina, con l'audio, per un Mac Apple Silicon.
 Il Mac principale invia lo schermo all'iMac via cavo Thunderbolt, senza perdita di qualità.
+
+_Nome di sviluppo: RelayLite. I due programmi si chiamano RelayHost e RelayViewer, e in macOS il monitor virtuale compare come "iMac 5K (RelayLite)"._
 
 ## Come funziona
 

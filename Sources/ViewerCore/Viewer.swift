@@ -369,6 +369,10 @@ public final class ViewerController {
         window.backgroundColor = .black
         window.isReleasedWhenClosed = false
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        // Sopra la barra dei menu e il Dock dell'iMac: le opzioni di presentazione che li
+        // nascondono valgono solo se l'app riesce a passare in primo piano, e un'app lanciata
+        // in background all'accesso non sempre ci riesce.
+        window.level = NSWindow.Level(rawValue: NSWindow.Level.mainMenu.rawValue + 1)
         videoView.metalLayer.contentsScale = screen.backingScaleFactor
         self.window = window
         self.videoView = videoView
@@ -379,8 +383,7 @@ public final class ViewerController {
             case .standalone:
                 NSApp.terminate(nil)
             case .background:
-                self.hide()
-                self.state = .dismissed
+                self.dismiss()
             }
             return nil
         }
@@ -400,6 +403,13 @@ public final class ViewerController {
         self.receiver = receiver
 
         if mode == .standalone { show() }
+    }
+
+    /// Nasconde lo schermo del Mac finché resta collegato (Esc).
+    func dismiss() {
+        guard state == .showing else { return }
+        hide()
+        state = .dismissed
     }
 
     /// Rimostra lo schermo nascosto con Esc, se il Mac principale è ancora collegato.
@@ -429,6 +439,7 @@ public final class ViewerController {
         }
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless() // anche se l'app non è riuscita a passare in primo piano
         NSApp.presentationOptions = [.hideDock, .hideMenuBar]
         NSCursor.hide()
     }

@@ -17,7 +17,11 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 cp App/Info.plist "$APP/Contents/Info.plist"
 lipo -create "${BIN[@]}" -output "$APP/Contents/MacOS/Lazarus5K"
-codesign --force --sign - "$APP"
+# Firma locale con un requisito legato all'identificativo dell'app e non all'impronta del
+# binario: così macOS riconosce le versioni ricompilate e non revoca il permesso
+# Registrazione schermo a ogni build.
+codesign --force --sign - \
+    --requirements '=designated => identifier "io.github.mrstark2.lazarus5k"' "$APP"
 
 echo
 echo "Pronta: $APP ($(lipo -archs "$APP/Contents/MacOS/Lazarus5K"))"

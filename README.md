@@ -89,7 +89,7 @@ L'audio viene catturato dal sistema, quindi esce anche dagli altoparlanti del Ma
 - Usa l'API **privata e non documentata** `CGVirtualDisplay`: un aggiornamento di macOS potrebbe romperla in qualsiasi momento.
 - **Testato solo** su un iMac 27" 5K fine 2015 con macOS Monterey e su un Mac Apple Silicon. Altre configurazioni potrebbero non funzionare.
 - Ottimo per lavoro, testo e browser. Video a schermo intero e giochi possono perdere fps, perché ogni frame cambia quasi tutto lo schermo.
-- L'app ha solo una firma locale: al primo avvio serve clic destro › Apri. Ogni volta che la ricompili, macOS la considera un'app nuova e può chiedere di nuovo il permesso Registrazione schermo.
+- L'app ha solo una firma locale: al primo avvio serve clic destro › Apri. La firma è legata all'identificativo dell'app, così le versioni ricompilate mantengono il permesso Registrazione schermo.
 - L'iMac deve essere già acceso e con l'utente collegato: non si può accendere o risvegliare dal Mac principale.
 
 ## Risoluzione problemi
@@ -98,7 +98,7 @@ L'audio viene catturato dal sistema, quindi esce anche dagli altoparlanti del Ma
 
 L'Host riprova da solo per qualche secondo, poi si ferma con questo messaggio. Da Terminale, RelayHost stampa anche l'elenco degli schermi che ScreenCaptureKit vede. Prova, nell'ordine:
 
-1. **Permesso Registrazione schermo**: in Impostazioni di Sistema › Privacy e sicurezza › Registrazione schermo e audio di sistema, verifica che Lazarus5K (o il Terminale, se usi RelayHost) sia abilitato. Se lo era già, toglilo e rimettilo, poi chiudi e riapri l'app. Dopo una ricompilazione serve di nuovo.
+1. **Permesso Registrazione schermo**: in Impostazioni di Sistema › Privacy e sicurezza › Registrazione schermo e audio di sistema, verifica che Lazarus5K (o il Terminale, se usi RelayHost) sia abilitato. Se lo era già, toglilo e rimettilo, poi chiudi e riapri l'app.
 2. **Duplicazione**: se il monitor virtuale è impostato per duplicare un altro schermo, ScreenCaptureKit non lo vede. L'Host prova a disattivare la duplicazione da solo; se non ci riesce, in Impostazioni di Sistema › Monitor imposta "iMac 5K (RelayLite)" come monitor esteso, non duplicato.
 3. **Riavvio**: dopo molti avvii e chiusure, macOS a volte conserva monitor virtuali "fantasma". Riavvia il Mac principale e riapri l'app.
 

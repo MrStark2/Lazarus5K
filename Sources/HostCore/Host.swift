@@ -156,7 +156,23 @@ final class Sender {
         return connection != nil && pending < maxPending
     }
 
-    func connect(to endpoint: NWEndpoint) {
+    /// Fornisce l'indirizzo dell'iMac: viene richiamato a ogni tentativo, così una
+    /// riconnessione trova l'iMac anche se nel frattempo ha cambiato indirizzo.
+    typealias EndpointProvider = (@escaping (NWEndpoint) -> Void) -> Void
+    private var provider: EndpointProvider?
+
+    func start(_ provider: @escaping EndpointProvider) {
+        self.provider = provider
+        attempt()
+    }
+
+    private func attempt() {
+        lock.lock(); let stopped = self.stopped; lock.unlock()
+        guard !stopped, let provider else { return }
+        provider { [weak self] endpoint in self?.connect(to: endpoint) }
+    }
+
+    private func connect(to endpoint: NWEndpoint) {
         lock.lock(); let stopped = self.stopped; lock.unlock()
         guard !stopped else { return }
         let tcp = NWProtocolTCP.Options()
@@ -184,7 +200,7 @@ final class Sender {
                 self.setConnection(nil)
                 conn.cancel()
                 self.onDisconnected?()
-                self.queue.asyncAfter(deadline: .now() + 2) { self.connect(to: endpoint) }
+                self.queue.asyncAfter(deadline: .now() + 2) { self.attempt() }
             default:
                 break
             }
@@ -682,21 +698,30 @@ public final class HostSession {
             }
         }
 
-        let connectAll: (NWEndpoint) -> Void = { endpoint in
-            video.connect(to: endpoint)
-            audio.connect(to: endpoint)
+        let connectAll: (@escaping Sender.EndpointProvider) -> Void = { provider in
+            video.start(provider)
+            audio.start(provider)
         }
         if let target {
             state = .connecting
-            connectAll(.hostPort(host: NWEndpoint.Host(target),
-                                 port: NWEndpoint.Port(rawValue: defaultPort)!))
+            let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(target),
+                                               port: NWEndpoint.Port(rawValue: defaultPort)!)
+            connectAll { $0(endpoint) }
         } else {
             print("Cerco l'iMac via Bonjour (sul cavo)…")
             state = .searching
             browser = discoverViewer { [weak self] endpoint in
                 guard let self, self.run == run else { return }
                 self.browser = nil
-                connectAll(endpoint)
+                guard case let .service(name, type, domain, _) = endpoint else {
+                    return connectAll { $0(endpoint) }
+                }
+                connectAll { done in
+                    // Il servizio va risolto sul cavo; se non risponde, prova la risoluzione normale.
+                    DispatchQueue.main.async {
+                        CableResolver.resolve(name: name, type: type, domain: domain) { done($0 ?? endpoint) }
+                    }
+                }
             }
         }
     }
